@@ -75,6 +75,33 @@ function generateICS(json) {
 
 import template from './template.js';
 
+const RETRY_COUNT = 5;
+
+async function fetchCalendarData(url, options = {}, retries = RETRY_COUNT) {
+	let lastError;
+	for (let attempt = 1; attempt <= retries; attempt++) {
+		try {
+			const response = await fetch(url, options);
+			if (!response.ok) {
+				throw new Error(`Fetch failed with status: ${response.status}`);
+			}
+			const text = await response.text();
+			try {
+				return JSON.parse(text);
+			} catch (parseError) {
+				throw new Error(`Invalid JSON: ${text}`);
+			}
+		} catch (err) {
+			lastError = err;
+			console.warn(`Attempt ${attempt} failed: ${err.message}`);
+			if (attempt < retries) {
+				await new Promise(res => setTimeout(res, 1000 * Math.pow(2, attempt - 1)));
+			}
+		}
+	}
+	throw lastError;
+}
+
 export default {
 	async fetch(request, env, ctx) {
 		const url = new URL(request.url);
@@ -82,17 +109,20 @@ export default {
 		const language_code = language.toUpperCase().includes('ZH') ? 'ZH' : 'EN';
 		switch (url.pathname) {
 			case '/cal.ics':
-				// return the ICS file
-				const response = await fetch(`https://mobile.cuhk.edu.cn/api/work/sc/scCalendar/getAppCalendar?type=current&lang=${language_code}`, {
-					cf: {
-						// Always cache this fetch regardless of content type
-						// for a max of 10 mins before revalidating the resource
-						cacheTtl: 600,
-						cacheEverything: true,
-					},
-				})
-				const data = await response.json();
-				return new Response(generateICS(data), { status: 200, headers: { "Content-Type": "text/calendar" } });
+				const apiUrl = `https://mobile.cuhk.edu.cn/api/work/sc/scCalendar/getAppCalendar?type=current&lang=${language_code}`;
+
+				let data;
+				try {
+					data = await fetchCalendarData(apiUrl);
+				} catch (err) {
+					console.error('Failed after retries:', err.message);
+					return new Response(`Error retrieving calendar data: ${err.message}`, { status: 502 });
+				}
+
+				return new Response(generateICS(data), {
+					status: 200,
+					headers: { 'Content-Type': 'text/calendar' },
+				});
 			case '/':
 			default:
 				const ics_path = `${url.origin}/cal.ics`;
